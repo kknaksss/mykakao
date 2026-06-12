@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mykakao — 카톡 메시지 복호화 데모</title>
+<style>
+  :root {
+    --bg:#1b1d22; --panel:#22252b; --panel2:#2a2e36; --line:#343842;
+    --txt:#e8eaed; --muted:#9aa0a8; --me:#ffe14d; --me-txt:#2a2400; --other:#343842;
+    --accent:#4c8dff;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:-apple-system,"Apple SD Gothic Neo",sans-serif;
+         background:var(--bg); color:var(--txt); height:100vh; display:flex; flex-direction:column; }
+  header { padding:12px 18px; border-bottom:1px solid var(--line); background:var(--panel);
+           display:flex; align-items:center; gap:16px; flex-wrap:wrap; }
+  header h1 { font-size:15px; margin:0; font-weight:700; }
+  .badges { display:flex; gap:8px; flex-wrap:wrap; }
+  .badge { background:var(--panel2); border:1px solid var(--line); border-radius:999px;
+           padding:4px 10px; font-size:12px; color:var(--muted); }
+  .badge b { color:var(--txt); }
+  .search { margin-left:auto; display:flex; gap:6px; }
+  .search input { background:var(--panel2); border:1px solid var(--line); border-radius:8px;
+           padding:7px 11px; color:var(--txt); width:240px; font-size:13px; outline:none; }
+  .search input:focus { border-color:var(--accent); }
+  .search button { background:var(--accent); border:0; color:#fff; border-radius:8px;
+           padding:7px 13px; font-size:13px; cursor:pointer; }
+  main { flex:1; display:flex; min-height:0; }
+  #list { width:300px; border-right:1px solid var(--line); overflow-y:auto; background:var(--panel); }
+  .row { padding:11px 16px; border-bottom:1px solid var(--line); cursor:pointer; }
+  .row:hover { background:var(--panel2); }
+  .row.active { background:var(--panel2); border-left:3px solid var(--me); }
+  .row .nm { font-size:14px; font-weight:600; display:flex; justify-content:space-between; gap:8px; }
+  .row .nm .mc { color:var(--muted); font-size:11px; font-weight:400; }
+  .row .sub { font-size:11px; color:var(--muted); margin-top:3px; }
+  #pane { flex:1; display:flex; flex-direction:column; min-width:0; }
+  #paneHead { padding:12px 18px; border-bottom:1px solid var(--line); font-size:14px; font-weight:600;
+              background:var(--panel); }
+  #msgs { flex:1; overflow-y:auto; padding:16px 18px; display:flex; flex-direction:column; gap:8px; }
+  .m { max-width:70%; }
+  .m .meta { font-size:11px; color:var(--muted); margin-bottom:2px; }
+  .m .bubble { padding:8px 12px; border-radius:12px; font-size:13.5px; line-height:1.45;
+               white-space:pre-wrap; word-break:break-word; background:var(--other); }
+  .m.me { align-self:flex-end; align-items:flex-end; display:flex; flex-direction:column; }
+  .m.me .bubble { background:var(--me); color:var(--me-txt); }
+  .m .time { font-size:10px; color:var(--muted); margin-top:2px; }
+  .empty { color:var(--muted); padding:40px; text-align:center; font-size:13px; }
+  .sr { padding:11px 16px; border-bottom:1px solid var(--line); cursor:pointer; }
+  .sr:hover { background:var(--panel2); }
+  .sr .top { font-size:11px; color:var(--muted); display:flex; justify-content:space-between; gap:8px; }
+  .sr .tx { font-size:13px; margin-top:3px; }
+  mark { background:var(--me); color:var(--me-txt); border-radius:2px; }
+  .live { font-size:12px; color:#888; font-weight:700; letter-spacing:.3px; }
+  .live.on { color:#37d67a; animation:pulse 1.6s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.45} }
+  .m.new .bubble { animation:flash .9s ease-out; }
+  @keyframes flash { from{box-shadow:0 0 0 2px var(--accent)} to{box-shadow:none} }
+  #toasts { position:fixed; right:16px; bottom:16px; display:flex; flex-direction:column; gap:8px; z-index:50; }
+  .toast { background:var(--panel2); border:1px solid var(--line); border-left:3px solid var(--me);
+           border-radius:8px; padding:9px 13px; max-width:320px; font-size:12.5px; box-shadow:0 6px 20px rgba(0,0,0,.4);
+           animation:slidein .25s ease; }
+  .toast b { display:block; color:var(--muted); font-size:11px; margin-bottom:2px; }
+  @keyframes slidein { from{transform:translateY(8px);opacity:0} to{transform:none;opacity:1} }
+</style>
+</head>
+<body>
+<header>
+  <h1>🔓 mykakao</h1>
+  <span class="live" id="live" title="실시간 스트림">● LIVE</span>
+  <div class="badges" id="badges"><span class="badge">불러오는 중…</span></div>
+  <div class="search">
+    <input id="q" placeholder="전체 메시지 검색…" />
+    <button onclick="doSearch()">검색</button>
+  </div>
+</header>
+<main>
+  <div id="list"><div class="empty">…</div></div>
+  <div id="pane">
+    <div id="paneHead">대화방을 선택하세요</div>
+    <div id="msgs"><div class="empty">왼쪽에서 대화방을 고르거나, 위에서 검색하세요.</div></div>
+  </div>
+</main>
+<div id="toasts"></div>
+
+<script>
+const $ = s => document.querySelector(s);
+let curQ = "", curChat = null, msgCount = 0;
+
+async function api(p){ const r = await fetch(p); if(!r.ok) throw new Error(await r.text()); return r.json(); }
+const esc = s => (s??"").replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+
+async function loadStats(){
+  try{
+    const s = await api('/api/stats');
+    msgCount = s.messages;
+    $('#badges').innerHTML =
+      `<span class="badge">메시지 <b id="msgCount">${s.messages.toLocaleString()}</b></span>`+
+      `<span class="badge">대화방 <b>${s.rooms.toLocaleString()}</b></span>`+
+      `<span class="badge">user_id <b>${s.user_id}</b></span>`+
+      `<span class="badge">DB <b>${s.db_file.slice(0,10)}…</b></span>`;
+  }catch(e){ $('#badges').innerHTML = `<span class="badge" style="color:#ff6b6b">에러: ${esc(e.message)}</span>`; }
+}
+
+async function loadChats(){
+  try{
+    const cs = await api('/api/chats?limit=200');
+    $('#list').innerHTML = cs.map(c =>
+      `<div class="row" data-id="${c.chatId}" onclick="openChat('${c.chatId}', this)">
+         <div class="nm">${esc(c.name)} <span class="mc">${c.isGroup?'그룹·':''}${c.members??'?'}명</span></div>
+         <div class="sub">${c.lastAt??''}</div>
+       </div>`).join('') || '<div class="empty">대화방 없음</div>';
+  }catch(e){ $('#list').innerHTML = `<div class="empty" style="color:#ff6b6b">${esc(e.message)}</div>`; }
+}
+
+async function openChat(id, el){
+  curChat = id;
+  document.querySelectorAll('.row').forEach(r=>r.classList.remove('active'));
+  if(el) el.classList.add('active');
+  const nm = el ? el.querySelector('.nm').childNodes[0].textContent.trim() : id;
+  $('#paneHead').textContent = nm;
+  $('#msgs').innerHTML = '<div class="empty">불러오는 중…</div>';
+  try{
+    const ms = await api('/api/messages?chat_id='+id+'&limit=120');
+    if(!ms.length){ $('#msgs').innerHTML = '<div class="empty">메시지 없음</div>'; return; }
+    $('#msgs').innerHTML = ms.map(m =>
+      `<div class="m ${m.isMe?'me':''}">
+         ${m.isMe?'':`<div class="meta">${esc(m.sender||'알수없음')}</div>`}
+         <div class="bubble">${esc(m.text)}</div>
+         <div class="time">${m.at??''}</div>
+       </div>`).join('');
+    const box=$('#msgs'); box.scrollTop = box.scrollHeight;
+  }catch(e){ $('#msgs').innerHTML = `<div class="empty" style="color:#ff6b6b">${esc(e.message)}</div>`; }
+}
+
+async function doSearch(){
+  const q = $('#q').value.trim(); if(!q) return; curQ=q; curChat=null;
+  $('#paneHead').textContent = `검색: "${q}"`;
+  $('#msgs').innerHTML = '<div class="empty">검색 중…</div>';
+  try{
+    const rs = await api('/api/search?q='+encodeURIComponent(q)+'&limit=150');
+    if(!rs.length){ $('#msgs').innerHTML = '<div class="empty">결과 없음</div>'; return; }
+    const re = new RegExp('('+q.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+')','gi');
+    $('#msgs').innerHTML = rs.map(r =>
+      `<div class="sr" onclick="openChat('${r.chatId}')">
+         <div class="top"><span>${esc(r.room||'?')} · ${esc(r.sender||'')}</span><span>${r.at??''}</span></div>
+         <div class="tx">${esc(r.text).replace(re,'<mark>$1</mark>')}</div>
+       </div>`).join('');
+  }catch(e){ $('#msgs').innerHTML = `<div class="empty" style="color:#ff6b6b">${esc(e.message)}</div>`; }
+}
+$('#q').addEventListener('keydown', e=>{ if(e.key==='Enter') doSearch(); });
+
+function bumpCount(){
+  msgCount++;
+  const el = $('#msgCount'); if(el) el.textContent = msgCount.toLocaleString();
+}
+function toast(m){
+  const box = $('#toasts');
+  const t = document.createElement('div'); t.className='toast';
+  t.innerHTML = `<b>${esc(m.room||'')} · ${esc(m.sender||(m.isMe?'나':'알수없음'))}</b>${esc(m.text)}`;
+  box.appendChild(t);
+  setTimeout(()=>t.remove(), 5000);
+}
+function appendLive(m){
+  const box = $('#msgs');
+  if(box.querySelector('.empty')) box.innerHTML='';
+  const div = document.createElement('div');
+  div.className = 'm new'+(m.isMe?' me':'');
+  div.innerHTML = (m.isMe?'':`<div class="meta">${esc(m.sender||'알수없음')}</div>`)+
+    `<div class="bubble">${esc(m.text)}</div><div class="time">${m.at??''}</div>`;
+  box.appendChild(div);
+  box.scrollTop = box.scrollHeight;
+}
+function startStream(){
+  const ev = new EventSource('/api/stream');
+  ev.onopen = ()=> $('#live').classList.add('on');
+  ev.onerror = ()=> $('#live').classList.remove('on');  // 자동 재연결됨
+  ev.onmessage = e=>{
+    const m = JSON.parse(e.data);
+    bumpCount();
+    if(curChat && m.chatId===curChat) appendLive(m);
+    else toast(m);
+  };
+}
+
+loadStats(); loadChats(); startStream();
+</script>
+</body>
+</html>
