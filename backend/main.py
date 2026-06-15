@@ -14,9 +14,11 @@ import time
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 from sqlalchemy import func, select
 
 from . import db
+from . import summarize as sm
 from .models import ChatMessage, ChatRoom, User
 
 app = FastAPI(title="mykakao demo")
@@ -203,6 +205,107 @@ def stream(request: Request, after: str | None = None):
                 time.sleep(1)
         finally:
             con.close()
+
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+class SummarizeRequest(BaseModel):
+    chat_id: str
+    date: str
+    prompt: str
+
+
+@app.post("/api/summarize")
+async def summarize(req: SummarizeRequest):
+    """그 방·그날 메시지를 OQ-2 템플릿으로 조립(+cap) 후 codex submit → {task_id}.
+
+    SPEC-002 BE Contract / Case Matrix:
+    - 빈 프롬프트 / 잘못된 chat_id·date → 400
+    - 그날 0건 → 거부 아님, empty 플래그로 빈 결과 반환(요약 미실행)
+    - cap 초과 → 오래된 것부터 truncate + 고지 메타(에러 아님)
+    - redis/워커 미가동 → 503
+    """
+    prompt = (req.prompt or "").strip()
+    if not prompt:
+        raise HTTPException(400, "프롬프트가 비어 있다")
+    try:
+        cid = int(req.chat_id)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "chat_id 가 정수가 아니다")
+    try:
+        start, end = sm.day_range(req.date)
+    except ValueError:
+        raise HTTPException(400, "date 형식이 잘못됐다 (YYYY-MM-DD)")
+
+    room_name = sm.resolve_room_name(cid)
+    if room_name is None:
+        raise HTTPException(400, "존재하지 않는 chat_id")
+
+    messages = sm.fetch_day_messages(cid, start, end)
+    if not messages:
+        return {"task_id": None, "empty": True, "total": 0, "shown": 0, "notice": None}
+
+    kept, total, truncated = sm.apply_cap(messages, sm.MAX_MESSAGES)
+    assembled = sm.assemble_prompt(prompt, room_name, req.date, kept)
+    notice = sm.truncation_notice(total, len(kept)) if truncated else None
+
+    try:
+        client = await sm.get_client()
+        task_id = await client.submit(
+            assembled, provider=sm.PROVIDER, model=sm.MODEL, queue=sm.QUEUE
+        )
+    except Exception as e:  # redis 미가동/연결 실패 등
+        raise HTTPException(503, f"요약 서버(워커) 미가동: {e}")
+
+    return {
+        "task_id": task_id,
+        "empty": False,
+        "total": total,
+        "shown": len(kept),
+        "notice": notice,
+    }
+
+
+def _sse(payload: dict) -> str:
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+@app.get("/api/summarize/stream")
+async def summarize_stream(task_id: str = Query(...)):
+    """open_kknaks text 이벤트를 SSE 릴레이 + 종료 후 TaskStatus 기반 terminal 합성.
+
+    StreamEvent 엔 종료/에러 전용 이벤트가 없다(WORK-002 grounding). 토큰은 type=="text"
+    의 .text. 스트림 종료 후 task 상태(done/failed/cancelled)+error 로 done/error 를 합성한다.
+    SSE 이벤트 키: {type:"text",text} / {type:"done",status} / {type:"error",error,status}.
+    """
+
+    async def gen():
+        try:
+            client = await sm.get_client()
+        except Exception as e:
+            yield _sse({"type": "error", "error": f"요약 서버(워커) 미가동: {e}"})
+            return
+        yield ": connected\n\n"
+        try:
+            async for ev in client.stream(
+                task_id, event_types={"text"}, timeout=sm.STREAM_TIMEOUT_S
+            ):
+                if ev.text:
+                    yield _sse({"type": "text", "text": ev.text})
+            # 스트림 종료 → 이미 terminal 이므로 즉시 반환된다.
+            task = await client.result(task_id, timeout=1)
+            status = task.status if task else None
+            if status == "done":
+                yield _sse({"type": "done", "status": status})
+            else:
+                err = (task.error if task and task.error else None) or "요약 생성 실패"
+                yield _sse({"type": "error", "error": err, "status": status})
+        except Exception as e:
+            yield _sse({"type": "error", "error": str(e)})
 
     return StreamingResponse(
         gen(),
