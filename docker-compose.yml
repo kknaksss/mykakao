@@ -1,0 +1,38 @@
+# mykakao AI 요약 인프라 (WORK-002 W-3)
+# 구성: redis(docker) + codex worker(docker). backend 는 호스트 run.sh (도커 아님).
+# 결과 DB(postgres) 미포함 — SSE 휘발, out-of-scope.
+# open_kknaks examples/docker-compose.yml 미러 (app 서비스 제거, codex 전용).
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"            # 호스트 backend 가 redis://localhost:6379 로 연결
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 3
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    depends_on:
+      redis:
+        condition: service_healthy
+    env_file: .env             # NAMESPACE=mykakao / QUEUES=default / REDIS_URL=redis://redis:6379 등
+    environment:
+      # codex CLI(.codex-tools/) + codex 인증(.codex-home) 위치
+      - PATH=/codex-tools/node_modules/.bin:/usr/local/bin:/usr/bin:/bin
+      - CODEX_HOME=/codex-home
+    volumes:
+      - .:/project:ro                        # WORK_DIR (codex cwd) = mykakao git repo.
+                                             # git repo 여야 codex 의 git-repo-check 를 통과한다
+                                             # (submit 가 --skip-git-repo-check 를 안 보내므로).
+
+      - ./.codex-tools:/codex-tools:ro       # Linux codex CLI (setup.sh 가 설치)
+      - ./.codex-home:/codex-home            # 호스트 ~/.codex 인증 복사본 (rw)
+
+volumes:
+  redis_data:

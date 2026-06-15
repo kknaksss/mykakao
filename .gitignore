@@ -3,3 +3,8 @@ config.json
 __pycache__/
 *.pyc
 .DS_Store
+# W-3 docker — 인증/바이너리/로컬 env 커밋 방지
+.env
+.codex-tools/
+.codex-home/
+.claude-tools/

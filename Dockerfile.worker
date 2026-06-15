@@ -1,0 +1,20 @@
+# mykakao codex worker (WORK-002 W-3) — open_kknaks examples/Dockerfile.worker 기반.
+# host backend(T-005) 와 동일 핀: open-kknaks==2.0.2 (redis Task 스키마 호환 필수).
+#
+# node 필요: @openai/codex 의 .bin/codex 는 `#!/usr/bin/env node` 런처라 node 런타임이
+# 있어야 native codex 바이너리를 부트스트랩한다. examples 는 .claude-tools/node 를 마운트하지만,
+# 여기선 node 바이너리를 이미지에 멀티스테이지로 넣어 self-contained 로 만든다.
+FROM node:22.16.0-bookworm-slim AS node
+
+FROM python:3.12-slim
+COPY --from=node /usr/local/bin/node /usr/local/bin/node
+
+RUN pip install --no-cache-dir "open-kknaks==2.0.2"
+
+RUN useradd -m worker
+USER worker
+
+WORKDIR /app
+COPY --chown=worker:worker worker/ .
+
+CMD ["python3", "run.py"]
