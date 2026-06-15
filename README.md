@@ -1,6 +1,6 @@
 # mykakao
 
-macOS 카카오톡의 로컬 메시지 DB를 **"대화 내보내기" 없이** 복호화해서, 브라우저에서 대화방·메시지·검색·**실시간 스트림**을 확인하는 데모.
+macOS 카카오톡의 로컬 메시지 DB를 **"대화 내보내기" 없이** 복호화해서, 브라우저에서 대화방·메시지·검색·**실시간 스트림**을 확인하고, 선택한 방의 **하루치 대화를 AI(codex)로 요약**하는 데모.
 
 > 💡 복호화는 **표준 `sqlcipher` + 자체 키 유도**로 직접 한다. 외부 런타임 의존 없음.
 > 🔒 **본인 기기에서 본인 카톡 데이터에만** 동작한다. 키는 이 기기의 device UUID + 본인 user_id 에서 유도되므로 다른 사람의 DB는 못 푼다.
@@ -22,9 +22,28 @@ plist (user_id 복구: SHA512 preimage) ─┼─▶ 키 유도(PBKDF2) ─▶ s
 | `backend/extract.py` | device UUID + user_id 복구 + 키 유도 (전부 자체 구현) |
 | `backend/db.py` | `sqlcipher3` 드라이버에 키 주입한 SQLAlchemy 엔진 (`mode=ro`, NullPool) |
 | `backend/models.py` | 카톡 테이블 ORM 매핑 (NTChatRoom / NTChatMessage / NTUser) |
-| `backend/main.py` | FastAPI — REST 4종 + SSE + 프론트 서빙 |
-| `frontend/index.html` | 바닐라 JS 단일 페이지 (사이드바·말풍선·검색·LIVE) |
+| `backend/main.py` | FastAPI — REST + SSE + 요약 + 프론트 서빙 |
+| `backend/summarize.py` | 그 방·그날 메시지 조회 → 프롬프트 조립 → codex submit/stream |
+| `frontend/index.html` | 대화방 목록 (사이드바·말풍선·검색·LIVE + 날짜선택 → 요약 진입) |
+| `frontend/summary.html` | AI 요약 화면 (프롬프트 작성 → SSE 스트리밍 렌더) |
 | `run.sh` | venv 생성 → 의존성 설치 → 키 복구 → 서버 기동 |
+
+### AI 요약 파이프라인
+
+요약은 [`open-kknaks`](https://github.com/kknaksss/open_kknaks) 태스크 큐(Redis)를 통해 **codex** worker로 보낸다. backend는 호스트에서, redis+worker는 docker로 띄운다.
+
+```
+[브라우저] 방·날짜·프롬프트
+   ▶ POST /api/summarize  ─(조립 + cap)─▶ open-kknaks submit ─▶ Redis ─▶ codex worker(docker)
+   ◀ GET /api/summarize/stream ◀────────── SSE 릴레이 ◀─ codex(gpt-5.5) 스트림
+```
+
+| 파일 | 역할 |
+|---|---|
+| `docker-compose.yml` | redis + codex worker (backend·DB는 미포함 — backend는 호스트) |
+| `Dockerfile.worker` | open-kknaks worker 이미지 (codex CLI + node 런타임 포함) |
+| `worker/run.py` | codex provider worker 기동 (cwd=`/project`) |
+| `setup.sh` | Linux codex CLI 설치(`.codex-tools/`) + 호스트 `~/.codex` 인증 복사(`.codex-home/`) + trust 등록 + `.env` 생성 |
 
 ---
 
@@ -59,6 +78,27 @@ cd mykakao
 - user_id 는 한 번 복구해 `config.json`(gitignore)에 캐시한다 → 다음 실행부터 즉시.
 - 포트 변경: `PORT=9000 ./run.sh`
 
+### AI 요약까지 쓰려면 (codex worker)
+
+요약 기능은 redis + codex worker(docker)가 추가로 필요하다. **사전: 호스트에서 codex CLI 로그인 완료(`~/.codex` 준비)**, Docker 설치.
+
+```bash
+# 1) codex worker 준비 (Linux codex 설치 + 호스트 인증 복사 + .env)
+bash setup.sh          # 최초 1회
+
+# 2) redis + codex worker 기동
+docker compose up -d --build
+
+# 3) backend (호스트)
+./run.sh
+```
+
+→ 목록에서 방·날짜 선택 → "요약하기" → 프롬프트 작성 → 실행하면 codex(gpt-5.5) 요약이 SSE로 스트리밍된다.
+
+- backend(호스트)는 `redis://localhost:6379`, worker(docker)는 `redis://redis:6379` — 같은 redis.
+- `NAMESPACE=mykakao` / `QUEUES=default` 가 backend↔worker 일치해야 픽업된다(`.env`/`backend/summarize.py`).
+- 로그: backend stdout, `docker compose logs -f worker`.
+
 ---
 
 ## 기능
@@ -70,6 +110,7 @@ cd mykakao
 | 메시지 뷰 | 방 선택 시 말풍선(내 메시지 우측 노랑) |
 | 검색 | 전체 메시지 키워드 검색(한국어 OK, 하이라이트) |
 | `● LIVE` | 카톡에 새 메시지가 오면 ~1초 내 자동 반영(SSE). 열어둔 방이면 말풍선, 아니면 우하단 토스트 |
+| **AI 요약** | 방·날짜(하루) 선택 + 직접 쓴 프롬프트로 그날 대화를 codex(gpt-5.5) 요약 → SSE 스트리밍. 메시지 과다 시 오래된 것부터 잘라내고 고지 |
 
 ### API
 
@@ -80,6 +121,8 @@ cd mykakao
 | GET | `/api/messages?chat_id=&limit=` | 특정 방 메시지 |
 | GET | `/api/search?q=&limit=` | 키워드 검색 |
 | GET | `/api/stream?after=` | SSE 실시간 스트림(새 logId push) |
+| POST | `/api/summarize` | `{chat_id,date,prompt}` → 조립+cap+codex submit → `{task_id, empty, total, shown, notice}` |
+| GET | `/api/summarize/stream?task_id=` | 요약 결과 SSE 릴레이(`type`: text/done/error) |
 
 ---
 
@@ -113,4 +156,7 @@ cd mykakao
 
 ## 범위
 
-이 데모는 **메시지 추출 확인**까지다. (일정 파싱/캘린더 연동은 다음 단계)
+이 데모는 **메시지 추출 + 하루치 대화 AI 요약**까지다. (일정 파싱/캘린더 연동, 요약 결과 영속화는 다음 단계)
+
+- 요약 결과는 **저장하지 않는다**(SSE 휘발). 히스토리/재조회는 후속.
+- codex 인증(`.codex-home`)·바이너리(`.codex-tools`)·`.env`는 `.gitignore` — 로컬 데모 전제.
