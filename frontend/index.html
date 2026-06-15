@@ -34,6 +34,13 @@
   .row .nm { font-size:14px; font-weight:600; display:flex; justify-content:space-between; gap:8px; }
   .row .nm .mc { color:var(--muted); font-size:11px; font-weight:400; }
   .row .sub { font-size:11px; color:var(--muted); margin-top:3px; }
+  .rowsum { display:flex; gap:6px; margin-top:8px; align-items:center; }
+  .rowsum .dpick { background:var(--panel2); border:1px solid var(--line); border-radius:6px;
+           padding:4px 7px; color:var(--txt); font-size:11.5px; outline:none; color-scheme:dark; }
+  .rowsum .dpick:focus { border-color:var(--accent); }
+  .rowsum .sumbtn { background:var(--accent); border:0; color:#fff; border-radius:6px;
+           padding:5px 11px; font-size:11.5px; cursor:pointer; white-space:nowrap; }
+  .rowsum .sumbtn:disabled { background:var(--line); color:var(--muted); cursor:not-allowed; }
   #pane { flex:1; display:flex; flex-direction:column; min-width:0; }
   #paneHead { padding:12px 18px; border-bottom:1px solid var(--line); font-size:14px; font-weight:600;
               background:var(--panel); }
@@ -109,6 +116,11 @@ async function loadChats(){
       `<div class="row" data-id="${c.chatId}" onclick="openChat('${c.chatId}', this)">
          <div class="nm">${esc(c.name)} <span class="mc">${c.isGroup?'그룹·':''}${c.members??'?'}명</span></div>
          <div class="sub">${c.lastAt??''}</div>
+         <div class="rowsum" onclick="event.stopPropagation()">
+           <input type="date" class="dpick" aria-label="요약 날짜"
+                  oninput="this.parentElement.querySelector('.sumbtn').disabled=!this.value" />
+           <button class="sumbtn" disabled onclick="goSummary('${c.chatId}', this)">요약하기</button>
+         </div>
        </div>`).join('') || '<div class="empty">대화방 없음</div>';
   }catch(e){ $('#list').innerHTML = `<div class="empty" style="color:#ff6b6b">${esc(e.message)}</div>`; }
 }
@@ -131,6 +143,14 @@ async function openChat(id, el){
        </div>`).join('');
     const box=$('#msgs'); box.scrollTop = box.scrollHeight;
   }catch(e){ $('#msgs').innerHTML = `<div class="empty" style="color:#ff6b6b">${esc(e.message)}</div>`; }
+}
+
+// 선택된 방·날짜를 들고 요약 화면으로 진입 (날짜 미선택 시 버튼 비활성)
+function goSummary(id, btn){
+  const inp = btn.parentElement.querySelector('.dpick');
+  const date = inp.value;
+  if(!date){ inp.focus(); return; }
+  location.href = `summary.html?chat_id=${encodeURIComponent(id)}&date=${encodeURIComponent(date)}`;
 }
 
 async function doSearch(){

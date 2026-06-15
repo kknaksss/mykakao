@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mykakao — AI 대화 요약</title>
+<style>
+  :root {
+    --bg:#1b1d22; --panel:#22252b; --panel2:#2a2e36; --line:#343842;
+    --txt:#e8eaed; --muted:#9aa0a8; --me:#ffe14d; --me-txt:#2a2400;
+    --accent:#4c8dff; --err:#ff6b6b; --ok:#37d67a;
+    color-scheme:dark;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:-apple-system,"Apple SD Gothic Neo",sans-serif;
+         background:var(--bg); color:var(--txt); height:100vh; display:flex; flex-direction:column; }
+  header { padding:12px 18px; border-bottom:1px solid var(--line); background:var(--panel);
+           display:flex; align-items:center; gap:14px; flex-wrap:wrap; }
+  header h1 { font-size:15px; margin:0; font-weight:700; }
+  .back { color:var(--muted); text-decoration:none; font-size:13px; border:1px solid var(--line);
+          border-radius:8px; padding:5px 11px; }
+  .back:hover { color:var(--txt); background:var(--panel2); }
+  .ctx { font-size:13px; color:var(--muted); }
+  .ctx b { color:var(--txt); }
+  main { flex:1; display:flex; flex-direction:column; min-height:0; padding:18px;
+         gap:14px; max-width:840px; width:100%; margin:0 auto; }
+  label.fld { font-size:12px; color:var(--muted); display:block; margin-bottom:6px; }
+  textarea#prompt { width:100%; min-height:96px; resize:vertical; background:var(--panel2);
+         border:1px solid var(--line); border-radius:10px; padding:11px 13px; color:var(--txt);
+         font-size:13.5px; line-height:1.5; outline:none; font-family:inherit; }
+  textarea#prompt:focus { border-color:var(--accent); }
+  .actions { display:flex; align-items:center; gap:12px; }
+  button#run { background:var(--accent); border:0; color:#fff; border-radius:8px;
+         padding:9px 18px; font-size:13.5px; font-weight:600; cursor:pointer; }
+  button#run:disabled { background:var(--line); color:var(--muted); cursor:not-allowed; }
+  button#run.stop { background:var(--err); }
+  .status { font-size:12.5px; color:var(--muted); }
+  .status.busy { color:var(--accent); }
+  .status.done { color:var(--ok); }
+  .resultwrap { flex:1; display:flex; flex-direction:column; min-height:0; }
+  #notice { font-size:12px; color:var(--me); margin-bottom:8px; display:none; }
+  #error { font-size:13px; color:var(--err); margin-bottom:8px; display:none;
+           border:1px solid var(--err); border-radius:8px; padding:9px 12px; background:rgba(255,107,107,.08); }
+  #result { flex:1; overflow-y:auto; background:var(--panel); border:1px solid var(--line);
+            border-radius:10px; padding:14px 16px; font-size:13.5px; line-height:1.6;
+            white-space:pre-wrap; word-break:break-word; min-height:120px; }
+  #result.empty { color:var(--muted); }
+  .cursor { display:inline-block; width:7px; height:15px; background:var(--accent);
+            margin-left:1px; vertical-align:text-bottom; animation:blink 1s steps(2) infinite; }
+  @keyframes blink { 0%,50%{opacity:1} 50.01%,100%{opacity:0} }
+</style>
+</head>
+<body>
+<header>
+  <a class="back" href="index.html">← 목록</a>
+  <h1>AI 대화 요약</h1>
+  <span class="ctx" id="ctx">…</span>
+</header>
+<main>
+  <div>
+    <label class="fld" for="prompt">요약 프롬프트 — 무엇을 어떻게 요약할지 직접 적으세요.</label>
+    <textarea id="prompt" placeholder="예: 이 대화에서 오늘 결정된 것과 해야 할 일을 항목으로 정리해줘."></textarea>
+  </div>
+  <div class="actions">
+    <button id="run" disabled>요약하기</button>
+    <span class="status" id="status"></span>
+  </div>
+  <div class="resultwrap">
+    <div id="notice"></div>
+    <div id="error"></div>
+    <div id="result" class="empty">요약 결과가 여기에 스트리밍됩니다.</div>
+  </div>
+</main>
+
+<script>
+const $ = s => document.querySelector(s);
+const qs = new URLSearchParams(location.search);
+const chatId = qs.get('chat_id') || '';
+const date   = qs.get('date') || '';
+
+const promptEl = $('#prompt');
+const runBtn   = $('#run');
+const statusEl = $('#status');
+const resultEl = $('#result');
+const noticeEl = $('#notice');
+const errorEl  = $('#error');
+
+// idle → submitting → streaming → done/error (+ 취소→idle, 재실행)
+let state = 'idle';
+let es = null;
+let terminated = false;
+let buf = '';
+
+// ── 진입 검증 ────────────────────────────────────────────────
+if (!chatId || !date) {
+  $('#ctx').textContent = '잘못된 접근';
+  showError('chat_id 또는 date가 없습니다. 목록에서 방과 날짜를 선택해 다시 들어오세요.');
+  promptEl.disabled = true;
+} else {
+  $('#ctx').innerHTML = `<b>${esc(chatId)}</b> · ${esc(date)}`;
+  resolveRoomName();
+}
+
+function esc(s){ return (s??'').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+
+// 방 이름 해석(부가) — 실패해도 chat_id fallback 유지
+async function resolveRoomName(){
+  try {
+    const r = await fetch('/api/chats?limit=500');
+    if (!r.ok) return;
+    const cs = await r.json();
+    const hit = cs.find(c => String(c.chatId) === String(chatId));
+    if (hit) $('#ctx').innerHTML = `<b>${esc(hit.name)}</b> · ${esc(date)}`;
+  } catch { /* fallback 유지 */ }
+}
+
+// ── 상태 머신 ────────────────────────────────────────────────
+function setState(s){
+  state = s;
+  runBtn.classList.toggle('stop', s === 'streaming');
+  runBtn.textContent = s === 'streaming' ? '중지'
+                     : s === 'submitting' ? '요청 중…'
+                     : '요약하기';
+  statusEl.className = 'status' + (s === 'submitting' || s === 'streaming' ? ' busy'
+                                 : s === 'done' ? ' done' : '');
+  statusEl.textContent = s === 'submitting' ? '요청 중…'
+                       : s === 'streaming'  ? '생성 중…'
+                       : s === 'done'       ? '완료'
+                       : '';
+  updateRunDisabled();
+}
+
+function updateRunDisabled(){
+  if (state === 'streaming')   { runBtn.disabled = false; return; }  // 중지 가능
+  if (state === 'submitting')  { runBtn.disabled = true;  return; }
+  runBtn.disabled = promptEl.value.trim() === '' || !chatId || !date; // 빈 프롬프트 거부
+}
+
+promptEl.addEventListener('input', updateRunDisabled);
+
+runBtn.addEventListener('click', () => {
+  if (state === 'streaming') cancel();
+  else if (state === 'idle' || state === 'done' || state === 'error') submit();
+});
+
+// ── 실행: POST → task_id → EventSource ───────────────────────
+async function submit(){
+  const prompt = promptEl.value.trim();
+  if (!prompt) return;
+
+  resetOutput();
+  terminated = false;
+  setState('submitting');
+
+  let data;
+  try {
+    const r = await fetch('/api/summarize', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, date, prompt }),
+    });
+    if (!r.ok) {
+      const msg = await safeMsg(r);
+      showError(r.status === 400
+        ? (msg || '잘못된 방/날짜 또는 프롬프트입니다.')
+        : (msg || `요약 요청 실패 (HTTP ${r.status})`));
+      setState('error');
+      return;
+    }
+    data = await r.json();
+  } catch (e) {
+    showError('요약 서버(워커)에 연결하지 못했습니다: ' + e.message);
+    setState('error');
+    return;
+  }
+
+  // 그날 메시지 0건 — task_id 없이 빈 결과(에러 아님)
+  if (!data || !data.task_id) {
+    resultEl.classList.add('empty');
+    resultEl.textContent = (data && (data.notice || data.message)) || '그날 메시지가 없습니다.';
+    setState('idle');
+    return;
+  }
+
+  // cap 생략 고지 — POST 응답의 truncated 메타에서 (에러 아님)
+  if (data.truncated && data.truncated.total != null) {
+    showNotice(`…(일부 생략됨, 총 ${data.truncated.total}개 중 ${data.truncated.shown}개 표시)`);
+  }
+
+  startStream(data.task_id);
+}
+
+function startStream(taskId){
+  setState('streaming');
+  resultEl.classList.remove('empty');
+  resultEl.innerHTML = '<span class="cursor"></span>';
+  es = new EventSource('/api/summarize/stream?task_id=' + encodeURIComponent(taskId));
+  es.onmessage = (e) => {
+    let ev; try { ev = JSON.parse(e.data); } catch { return; }
+    handleEvent(ev);
+  };
+  es.onerror = () => {
+    if (terminated) return;            // 정상 종료 후의 close는 무시
+    closeStream();
+    if (buf) showError('스트림이 중단되었습니다. 부분 결과를 유지합니다. 다시 시도하세요.');
+    else     showError('요약 서버(워커) 미가동 또는 스트림 연결 실패입니다.');
+    setState('error');
+  };
+}
+
+// SSE 계약(BE 합성): 토큰 {type:"text",text}, 완료 {type:"done"}, 에러 {type:"error",error}
+function handleEvent(ev){
+  switch (ev.type) {
+    case 'text':
+      buf += (ev.text ?? '');
+      renderBuf();
+      break;
+    case 'done':
+      terminate();
+      renderBuf(false);
+      setState('done');
+      break;
+    case 'error':
+      terminate();
+      showError(ev.error || ev.message || 'codex 오류가 발생했습니다. 다시 시도하세요.');
+      setState('error');
+      break;
+    // 그 외 이벤트는 무시
+  }
+}
+
+function renderBuf(withCursor = true){
+  resultEl.textContent = buf;
+  if (withCursor) resultEl.insertAdjacentHTML('beforeend', '<span class="cursor"></span>');
+}
+
+function cancel(){          // 중지(취소) → idle, 부분 결과 유지
+  terminate();
+  renderBuf(false);
+  setState('idle');
+  statusEl.textContent = '중지됨';
+}
+
+function terminate(){ terminated = true; closeStream(); }
+function closeStream(){ if (es) { es.close(); es = null; } }
+
+// ── 출력 헬퍼 ────────────────────────────────────────────────
+function resetOutput(){
+  buf = '';
+  resultEl.classList.remove('empty');
+  resultEl.textContent = '';
+  noticeEl.style.display = 'none'; noticeEl.textContent = '';
+  errorEl.style.display = 'none';  errorEl.textContent = '';
+}
+function showNotice(msg){ noticeEl.textContent = msg; noticeEl.style.display = 'block'; }
+function showError(msg){ errorEl.textContent = msg; errorEl.style.display = 'block'; }
+async function safeMsg(r){
+  try {
+    const t = await r.text();
+    try { const j = JSON.parse(t); return j.detail || j.message || j.error || t; }
+    catch { return t; }
+  } catch { return ''; }
+}
+
+setState('idle');
+</script>
+</body>
+</html>
