@@ -174,17 +174,17 @@ async function submit(){
     return;
   }
 
-  // 그날 메시지 0건 — task_id 없이 빈 결과(에러 아님)
-  if (!data || !data.task_id) {
+  // 그날 메시지 0건 — empty:true(또는 task_id 없음) → 빈 결과(에러 아님, 재실행 가능)
+  if (!data || data.empty === true || !data.task_id) {
     resultEl.classList.add('empty');
-    resultEl.textContent = (data && (data.notice || data.message)) || '그날 메시지가 없습니다.';
+    resultEl.textContent = (data && data.notice) || '그날 메시지가 없습니다.';
     setState('idle');
     return;
   }
 
-  // cap 생략 고지 — POST 응답의 truncated 메타에서 (에러 아님)
-  if (data.truncated && data.truncated.total != null) {
-    showNotice(`…(일부 생략됨, 총 ${data.truncated.total}개 중 ${data.truncated.shown}개 표시)`);
+  // cap 생략 고지 — BE가 완성한 notice 문자열을 그대로 표시 (null이면 미표시, 에러 아님)
+  if (data.notice) {
+    showNotice(data.notice);
   }
 
   startStream(data.task_id);
