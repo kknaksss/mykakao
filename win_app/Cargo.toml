@@ -1,0 +1,61 @@
+[package]
+name = "win_app"
+version = "0.1.0"
+edition = "2021"
+description = "mykakao Windows V2 — 방 선택 + 과거 히스토리 복호·저장 (P1)"
+publish = false
+
+[[bin]]
+name = "win_app"
+path = "src/main.rs"
+
+[dependencies]
+# async + web
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "fs", "time"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+axum = "0.7"
+tower-http = { version = "0.5", features = ["fs"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# 실시간 파일 감시(P2) — 내부 ReadDirectoryChangesW
+notify = "6"
+
+# storage (plaintext SQLite — bundled, no cipher/OpenSSL)
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+# errors
+anyhow = "1"
+thiserror = "1"
+
+# pure-Rust crypto for SQLCipher v4 page decrypt (no OpenSSL)
+aes = "0.8"
+cbc = { version = "0.1", features = ["alloc"] }
+hmac = "0.12"
+sha2 = "0.10"
+pbkdf2 = "0.12"
+
+[target.'cfg(windows)'.dependencies]
+# 트레이(P3)는 별도 crate 없이 windows crate 로 직접 구현(Shell_NotifyIconW + 메시지윈도우 + ShellExecuteW).
+# SAC(Smart App Control) 아래서 서명 없는 proc-macro DLL·build-script 를 새로 끌어오지 않기 위함.
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    # 사진 다운로드는 WinHTTP in-process(외부 curl.exe 없음 → GUI 앱에서 콘솔 창이 뜨지 않는다).
+    "Win32_Networking_WinHttp",
+    "Win32_System_Threading",
+    "Win32_System_Memory",
+    "Win32_System_ProcessStatus",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Registry",
+    "Win32_Storage_FileSystem",
+    "Win32_Security",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Controls",
+    "Win32_UI_Shell",
+    "Win32_Graphics_Gdi",
+] }
+
+[profile.release]
+opt-level = 3

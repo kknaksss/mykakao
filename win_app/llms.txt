@@ -1,0 +1,140 @@
+# mykakao (Windows) — 로컬 카카오톡 대화 조회 API
+
+> 본인 PC에서 실행 중인 KakaoTalk의 로컬 대화를 **내보내기 없이** 복호화해 축적하고,
+> 로컬 HTTP API 로 조회하게 해주는 트레이 앱. 다른 프로젝트의 에이전트(Claude 등)가
+> 이 문서를 읽고 **이 기기의 카톡 대화 데이터에 접근**하기 위한 진입점이다.
+
+## 이게 뭐고, 어떻게 접근하나
+
+- 앱 이름: `mykakao.exe` (Windows 트레이 앱, Rust).
+- 데이터 접근 = **로컬 HTTP API**. 베이스 URL: `http://127.0.0.1:8765`
+  - 기본 포트 `8765`. 환경변수 `WIN_APP_PORT` 로 바뀔 수 있다. 이 URL(`/llms.txt`)이 응답하면 앱이 떠 있는 것 = API 호출 가능.
+- 외부로 아무것도 전송하지 않는다. 전부 `127.0.0.1` 루프백.
+- 축적 DB(평문 SQLite) 실제 위치: `%LOCALAPPDATA%\mykakao\accumulate.sqlite`
+  (직접 열지 말고 **API 로 접근**하는 것을 권장 — 스키마/락/동시성은 앱이 관리한다.)
+
+## 안전·전제 (반드시 지킬 것)
+
+- **읽기 전용.** 카톡 원본 DB·프로세스는 절대 수정하지 않는다. 이 API 에도 쓰기(대화 생성/수정/삭제)는 없다.
+- **본인 기기·본인 카톡 전용.** 복호 키는 실행 중 카톡 메모리에서 passive 하게 회수하며 어디에도 저장하지 않는다.
+- 조회한 대화 **본문·닉네임·식별자**는 민감정보다. 로그로 남기거나 외부로 보내지 말 것.
+- 앱이 **로그인 상태(`logged_in=true`)** 이고 해당 방이 카톡에서 **열려 있어야**(`open=true`) 과거 메시지를 복호·수집할 수 있다.
+
+## 표준 사용 흐름
+
+1. `GET /api/state` — 카톡 실행·로그인 여부 확인. `logged_in=false` 면 사용자에게 카톡 로그인/방 열기를 요청.
+2. `GET /api/rooms` — 방 목록. 원하는 방의 `chat_id`(문자열) 확보.
+3. `POST /api/collect {"chat_id":"..."}` — 그 방을 지금 수집(열려 있으면 과거분 복호·축적).
+   - 또는 `POST /api/rooms/select {"chat_ids":["..."]}` 로 추적 대상에 등록(실시간 포함).
+4. `GET /api/messages?chat_id=...&limit=...` — 축적된 메시지 조회.
+5. (선택) `GET /api/stream?chat_id=...` — 그 방 새 메시지 실시간(SSE).
+
+## 엔드포인트
+
+### GET /api/state
+앱/카톡 상태.
+```
+curl http://127.0.0.1:8765/api/state
+```
+응답:
+```json
+{
+  "kakao_running": true,
+  "logged_in": true,
+  "recoverable_rooms": [123..., 456...],   // 지금 열려 있어 수집 가능한 chat_id (number)
+  "account": "ab12cd34",                     // 계정 지문(마스킹, 원값 아님)
+  "state": "UP_LOGGED_IN",                  // DOWN | UP_LOGGED_OUT | UP_LOGGED_IN
+  "me": "내 닉네임",                          // 없을 수 있음(null)
+  "my_user_id": 1234567890                   // 0 = 미상
+}
+```
+
+### GET /api/rooms
+방 목록(축적 store 기준, 이름 재해석은 백그라운드).
+```
+curl http://127.0.0.1:8765/api/rooms
+```
+응답(배열):
+```json
+[{
+  "chat_id": "18000000000000001",   // 문자열! (2^53 초과, 정밀도 보존)
+  "title": "방 제목",                 // null 가능(오픈채팅 대형방 등)
+  "member_count": 3,
+  "kind": "group",                   // group | direct | memo | null
+  "open": true,                      // 지금 카톡에서 열려 수집 가능한가
+  "selected": true,
+  "tracked": true,                   // 추적 대상(=selected)
+  "collect_status": "done",          // idle | collecting | waiting | done | error
+  "collected_rows": 1450
+}]
+```
+
+### POST /api/rooms/select
+추적(수집) 대상 방 집합을 설정. 주어진 집합만 selected, 나머지는 해제.
+```
+curl -X POST http://127.0.0.1:8765/api/rooms/select \
+  -H 'Content-Type: application/json' \
+  -d '{"chat_ids":["18000000000000001"]}'   // 문자열 권장(숫자도 하위호환)
+```
+응답: `{"ok":true,"selected":[...]}`
+
+### POST /api/collect
+한 방을 **지금 즉시** 수집(사용자가 방을 클릭한 것과 동등). 열려 있으면 과거분 복호·축적.
+```
+curl -X POST http://127.0.0.1:8765/api/collect \
+  -H 'Content-Type: application/json' \
+  -d '{"chat_id":"18000000000000001"}'
+```
+응답: `{"ok":true,"status":"done","rows":1450}`
+  - status: `done` | `waiting`(방 닫힘 — 카톡에서 열어야 함) | `collecting` | `not_tracked` | `error`
+
+### GET /api/messages
+축적된 메시지 조회(시간/순서 = log_id 오름차순).
+```
+curl 'http://127.0.0.1:8765/api/messages?chat_id=18000000000000001&limit=500'
+```
+쿼리: `chat_id`(필수, 숫자/문자열), `after`(이 log_id 초과분만, 기본 0), `limit`(기본 500, 1~5000).
+응답(배열):
+```json
+[{
+  "log_id": "4700000000000000001",   // 문자열
+  "author_id": 1234567890,
+  "author_name": "보낸 사람",          // null 가능
+  "type": 1,                          // 1=텍스트가 일반적, 그 외 미디어/시스템 등
+  "sent_at": 1725000000,              // epoch 초
+  "text": "메시지 본문",               // null 가능(미디어 등)
+  "kind": "photo",                    // 사진일 때만. 텍스트면 필드 없음
+  "media_status": "saved"             // 사진일 때만: saved | lost | pending
+}]
+```
+
+### GET /api/media/{chat_id}/{log_id}
+저장된 사진 바이트 서빙. `media_status=saved` 가 아니거나 파일 없으면 404.
+
+### GET /api/stream?chat_id=...
+그 방 새 메시지 실시간(SSE). `event: message`, data = /api/messages 의 한 행과 동일 shape.
+
+### POST /api/reset
+**파괴적.** 축적된 전체 데이터(방·메시지·작성자·사진) + 추적 설정 + 세션 캐시 + 디스크 미디어 파일을
+모두 삭제한다. 카카오톡 원본은 건드리지 않는다. 다른 사람이 이 PC 를 새로 쓰기 전 초기화 용도.
+```
+curl -X POST http://127.0.0.1:8765/api/reset
+```
+응답: `{"ok":true}`. (되돌릴 수 없음 — 사용자 확인 후에만 호출할 것.)
+
+## 데이터 모델 (참고)
+
+축적 store(`accumulate.sqlite`) 테이블:
+- `room(chat_id PK, title, member_count, kind, selected, last_synced_id, collect_status, collected_rows, updated_at)`
+- `message(chat_id, log_id, author_id, msg_type, sent_at, text, PK(chat_id,log_id))` — 멱등 upsert(재수집 중복 없음)
+- `author(chat_id, author_id, nickname, PK(chat_id,author_id))`
+- `media(chat_id, log_id, mime, status, file, updated_at, PK(chat_id,log_id))`
+
+주의:
+- `chat_id`/`log_id` 는 2^53 을 넘으므로 **JSON 에서 항상 문자열**로 주고받는다(number 로 캐스팅하면 정밀도 깨짐).
+- `sent_at` 은 정수 epoch(초). `type`(=msg_type) 은 카톡 원본 코드 — 1 이 일반 텍스트, 그 외는 미디어/시스템.
+
+## 현재 한계 (알아둘 것)
+
+- **단일 계정만** 바인딩된다. 앱 시작 시점에 로그인돼 있던 계정 폴더 하나만 본다. 실행 중 다른 카톡 아이디로 로그인하면 따라가지 못하고 `UP_LOGGED_OUT` 로 보일 수 있다.
+- 요약/일정 파싱 등 상위 기능은 이 API 범위 밖(별도).
