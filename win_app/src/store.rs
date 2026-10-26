@@ -406,6 +406,20 @@ impl Store {
             |r| r.get(0),
         )?)
     }
+
+    /// 전체 초기화: 축적된 방·메시지·작성자·미디어(행)·선택·커서를 모두 지운다.
+    /// (디스크의 미디어 파일 삭제는 호출측에서 media_root 정리로 처리.)
+    /// 다른 사용자가 이 PC 를 쓰기 전 데이터 비우기 용도.
+    pub fn reset(&self) -> Result<()> {
+        let c = self.lock();
+        c.execute_batch(
+            "DELETE FROM media;
+             DELETE FROM author;
+             DELETE FROM message;
+             DELETE FROM room;",
+        )?;
+        Ok(())
+    }
 }
 
 const SCHEMA: &str = r#"

@@ -114,6 +114,14 @@ curl 'http://127.0.0.1:8765/api/messages?chat_id=18000000000000001&limit=500'
 ### GET /api/stream?chat_id=...
 그 방 새 메시지 실시간(SSE). `event: message`, data = /api/messages 의 한 행과 동일 shape.
 
+### POST /api/reset
+**파괴적.** 축적된 전체 데이터(방·메시지·작성자·사진) + 추적 설정 + 세션 캐시 + 디스크 미디어 파일을
+모두 삭제한다. 카카오톡 원본은 건드리지 않는다. 다른 사람이 이 PC 를 새로 쓰기 전 초기화 용도.
+```
+curl -X POST http://127.0.0.1:8765/api/reset
+```
+응답: `{"ok":true}`. (되돌릴 수 없음 — 사용자 확인 후에만 호출할 것.)
+
 ## 데이터 모델 (참고)
 
 축적 store(`accumulate.sqlite`) 테이블:

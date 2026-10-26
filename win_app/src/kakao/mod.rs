@@ -25,25 +25,39 @@ fn local_appdata() -> Option<PathBuf> {
     std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
 }
 
-/// `users/` 아래 40-hex 계정 폴더를 자동 탐색(첫 매칭).
+/// `users/` 아래 40-hex 계정 폴더를 자동 탐색.
+///
+/// 계정이 여러 개일 수 있다(다른 사람이 이 PC 에서 로그인했던 적이 있으면 각자 폴더가 남는다).
+/// 그래서 "첫 폴더"를 잡지 않고 **지금 로그인된(계정 DB 가 잠긴) 계정을 우선** 선택한다.
+/// 로그인된 계정이 없으면(로그아웃 상태) **가장 최근 수정된 폴더**로 폴백한다.
 #[must_use]
 pub fn discover_account_dir() -> Option<PathBuf> {
     let base = local_appdata()?
         .join("Kakao")
         .join("KakaoTalk")
         .join("users");
-    let rd = std::fs::read_dir(&base).ok()?;
-    for e in rd.flatten() {
+    let mut hex_dirs: Vec<PathBuf> = Vec::new();
+    for e in std::fs::read_dir(&base).ok()?.flatten() {
         let name = e.file_name();
         let name = name.to_string_lossy();
-        if name.len() == 40 && name.bytes().all(|b| b.is_ascii_hexdigit()) {
-            let p = e.path();
-            if p.is_dir() {
-                return Some(p);
-            }
+        if name.len() == 40 && name.bytes().all(|b| b.is_ascii_hexdigit()) && e.path().is_dir() {
+            hex_dirs.push(e.path());
         }
     }
-    None
+    match hex_dirs.len() {
+        0 => return None,
+        1 => return hex_dirs.pop(),
+        _ => {}
+    }
+    // 여러 계정 → 지금 로그인된(계정 DB 잠긴) 폴더 우선.
+    #[cfg(windows)]
+    if let Some(open) = hex_dirs.iter().find(|d| crate::state::account_db_open(d)) {
+        return Some(open.clone());
+    }
+    // 폴백: 가장 최근 수정된 폴더(마지막 사용 계정일 가능성이 높다).
+    hex_dirs
+        .into_iter()
+        .max_by_key(|d| std::fs::metadata(d).and_then(|m| m.modified()).ok())
 }
 
 /// 계정 해시(계정 폴더명)의 마스킹 지문(로그용). 원값은 남기지 않는다.

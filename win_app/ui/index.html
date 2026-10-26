@@ -113,6 +113,8 @@ body{margin:0;background:var(--ground);color:var(--ink);font-family:var(--font);
 .btn.primary{background:var(--kakao);color:var(--on-kakao)}
 .btn.primary:hover{filter:brightness(.97)}
 .btn.primary:disabled{background:var(--ground);color:var(--ink-3);cursor:default}
+.btn.danger{background:var(--surface);border-color:rgba(229,72,77,.4);color:#E5484D}
+.btn.danger:hover{background:rgba(229,72,77,.1)}
 .dirtydot{width:7px;height:7px;border-radius:50%;background:#D1435B;margin-left:-3px}
 .split{flex:1;min-height:0;display:grid;grid-template-columns:280px 1fr;grid-template-rows:minmax(0,1fr);overflow:hidden}
 .side{border-right:1px solid var(--line);overflow-y:auto;min-height:0;background:var(--surface)}
@@ -208,6 +210,7 @@ body{margin:0;background:var(--ground);color:var(--ink);font-family:var(--font);
     <div class="bar">
       <div class="note"><svg class="icon"><use href="#i-clock"/></svg>
         <span><b>대기 중</b>인 방은 지금 닫혀 있어요 — 카톡에서 열리거나 메시지가 오면 <b>자동으로</b> 가져옵니다.</span></div>
+      <button class="btn danger" id="btn-reset"><svg class="icon"><use href="#i-x"/></svg> 초기화</button>
       <div class="spacer"></div>
       <button class="btn ghost" id="btn-cancel">취소</button>
       <button class="btn primary" id="btn-save" disabled><svg class="icon"><use href="#i-save"/></svg> 저장</button>
@@ -454,6 +457,19 @@ tabs.forEach(t=>t.addEventListener('click',()=>tabs.forEach(x=>{const on=x===t;
   x.setAttribute('aria-selected',on);$('#'+x.getAttribute('aria-controls')).hidden=!on;})));
 $('#btn-save').onclick=saveTracked;
 $('#btn-cancel').onclick=cancelEdit;
+$('#btn-reset').onclick=async()=>{
+  if(!confirm('모든 수집 데이터(대화방·메시지·사진)와 추적 설정을 지웁니다.\n카카오톡 원본은 그대로예요.\n\n다른 사람이 이 PC 를 쓰기 전에 초기화할 때 사용하세요. 진행할까요?')) return;
+  const b=$('#btn-reset'); b.disabled=true;
+  try{
+    await api('/api/reset',{method:'POST'});
+    // 클라이언트 상태도 비우고 다시 로드.
+    trackedSet=new Set(); savedSet=new Set(); loadedOnce=false;
+    curRoom=null; renderedIds=new Set();
+    await loadState(); await loadRooms(); updateDirty();
+    alert('초기화 완료. 이제 카카오톡을 로그아웃한 뒤 새 계정으로 로그인하고, 트레이에서 이 앱을 종료했다가 다시 실행하세요.');
+  }catch(e){ alert('초기화 실패: '+e.message); }
+  finally{ b.disabled=false; }
+};
 $('#room-search').oninput=(e)=>{ roomFilter=e.target.value.trim().toLowerCase(); renderTransfer(); };
 
 async function boot(){

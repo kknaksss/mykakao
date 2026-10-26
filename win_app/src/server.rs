@@ -133,6 +133,7 @@ pub fn router(state: Shared) -> Router {
         .route("/api/messages", get(get_messages))
         .route("/api/media/:chat_id/:log_id", get(get_media))
         .route("/api/stream", get(get_stream))
+        .route("/api/reset", post(post_reset))
         .route("/llms.txt", get(get_llms))
         .with_state(state)
         .fallback_service(ServeDir::new(ui_dir).append_index_html_on_directories(true))
@@ -296,6 +297,26 @@ impl AppState {
         *self.nick_cache.lock().unwrap_or_else(|e| e.into_inner()) = None;
         self.photo_sweep.lock().unwrap_or_else(|e| e.into_inner()).clear();
     }
+
+    /// 전체 초기화: store(방/메시지/작성자/미디어/선택/커서) 비우기 + 세션/진행상태 캐시 비우기
+    /// + 디스크 미디어 파일 삭제. 다른 사용자가 이 PC 를 쓰기 전에 흔적을 지우는 용도.
+    pub fn full_reset(&self) -> anyhow::Result<()> {
+        self.store.reset()?;
+        self.invalidate_session();
+        // 진행 상태/큐 캐시도 비운다(이전 사용자 수집 흔적 제거).
+        self.collect_busy.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        self.photo_busy.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        self.sweep_fail.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        *self.last_harvest.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        *self.last_refresh.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        // 디스크 미디어 파일 삭제(없으면 무시). 통째로 지우고 재생성.
+        let mroot = crate::kakao::photo::media_root();
+        if mroot.exists() {
+            let _ = std::fs::remove_dir_all(&mroot);
+        }
+        let _ = std::fs::create_dir_all(&mroot);
+        Ok(())
+    }
     /// 세션 키 후보(캐시 우선). 현재 pid 로 캐시 유효성 판정; miss 면 harvest 1회 후 캐싱.
     /// harvest 는 work_lock 아래(동시 harvest 방지). 키는 RAM only.
     pub fn cached_candidates(&self) -> Option<KeyCache> {
@@ -357,6 +378,15 @@ fn resolve_ui_dir() -> PathBuf {
         return cwd_ui;
     }
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui")
+}
+
+// ── /api/reset ──────────────────────────────────────────────────
+/// 전체 초기화. 축적 데이터·세션 캐시·미디어 파일을 모두 지운다.
+/// 다른 사용자가 이 PC 에서 카톡을 새로 쓰기 전에 호출. 카톡 원본은 건드리지 않는다.
+async fn post_reset(State(st): State<Shared>) -> Result<Json<serde_json::Value>, AppError> {
+    tokio::task::spawn_blocking(move || st.full_reset()).await??;
+    crate::applog::line("[win_app] 전체 초기화 완료(데이터·세션·미디어 삭제)");
+    Ok(Json(json!({ "ok": true })))
 }
 
 // ── /llms.txt ───────────────────────────────────────────────────
