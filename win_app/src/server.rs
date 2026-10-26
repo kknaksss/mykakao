@@ -133,6 +133,7 @@ pub fn router(state: Shared) -> Router {
         .route("/api/messages", get(get_messages))
         .route("/api/media/:chat_id/:log_id", get(get_media))
         .route("/api/stream", get(get_stream))
+        .route("/llms.txt", get(get_llms))
         .with_state(state)
         .fallback_service(ServeDir::new(ui_dir).append_index_html_on_directories(true))
 }
@@ -356,6 +357,18 @@ fn resolve_ui_dir() -> PathBuf {
         return cwd_ui;
     }
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui")
+}
+
+// ── /llms.txt ───────────────────────────────────────────────────
+/// 다른 프로젝트의 에이전트가 이 기기의 카톡 데이터에 접근하기 위한 진입점 문서.
+/// 소스는 `win_app/llms.txt`(dist 동봉본과 동일) — 컴파일 타임에 임베드해 서버-파일 drift 를 없앤다.
+const LLMS_TXT: &str = include_str!("../llms.txt");
+
+async fn get_llms() -> impl IntoResponse {
+    (
+        [(axum::http::header::CONTENT_TYPE, "text/markdown; charset=utf-8")],
+        LLMS_TXT,
+    )
 }
 
 // ── /api/state ──────────────────────────────────────────────────
